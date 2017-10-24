@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -45,8 +46,8 @@ func allNomadNodesAreReady(retries int) (bool, string) {
 	return isSuccess(cmd, retries, "initializing")
 }
 
-func jobIsReady(retries int, jobName string) (bool, string) {
-	cmd := exec.Command("nomad", "job", "status", jobName)
+func jobIsReady(retries int, flags, jobName string) (bool, string) {
+	cmd := exec.Command("nomad", "job", "status", flags, jobName)
 	return isSuccess(cmd, retries, "pending")
 }
 
@@ -74,7 +75,43 @@ func startCluster(clusterConfig []string) (func(), error) {
 	return f, nil
 }
 
+// requires nomad executable on the path
+func startACLServer(serverConfig string) (func(), string, error) {
+
+	cmd := exec.Command("nomad", "agent", "-config", serverConfig)
+	err := cmd.Start()
+
+	if err != nil {
+		return func() {}, "", err
+	}
+
+	f := func() {
+		cmd.Process.Kill()
+	}
+
+	// TODO poll to see when the server is ready
+	time.Sleep(10 * time.Second)
+
+	var bootstrapOut bytes.Buffer
+	var bootstrapErr bytes.Buffer
+
+	bootstrapCmd := exec.Command("nomad", "acl", "bootstrap")
+	bootstrapCmd.Stdout = &bootstrapOut
+	bootstrapCmd.Stderr = &bootstrapErr
+
+	err = bootstrapCmd.Run()
+
+	if err != nil {
+		fmt.Printf("exit status? bootstrapCmd %s \n", bootstrapErr.String())
+		return f, "", err
+	}
+
+	// TODO parse boostrap string and return only the secret id value
+	return f, bootstrapOut.String(), nil
+}
+
 func TestJobMigrations(t *testing.T) {
+	t.Skip()
 	t.Parallel()
 	assert := assert.New(t)
 
@@ -127,7 +164,7 @@ func TestJobMigrations(t *testing.T) {
 	err = jobCmd.Run()
 	assert.Nil(err)
 
-	isFirstJobReady, firstJoboutput := jobIsReady(20, "sleep")
+	isFirstJobReady, firstJoboutput := jobIsReady(20, "", "sleep")
 	assert.True(isFirstJobReady)
 	assert.NotContains(firstJoboutput, "failed")
 
@@ -169,8 +206,17 @@ func TestJobMigrations(t *testing.T) {
 	err = secondJobCmd.Run()
 	assert.Nil(err)
 
-	isReady, jobOutput := jobIsReady(20, "sleep")
+	isReady, jobOutput := jobIsReady(20, "", "sleep")
 	assert.True(isReady)
 	assert.NotContains(jobOutput, "failed")
 	assert.Contains(jobOutput, "complete")
+}
+
+func TestJobMigrations_WithACLs(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+
+	stopServer, _, err := startACLServer("server_acl_hcl")
+	assert.Nil(err)
+	defer stopServer()
 }
